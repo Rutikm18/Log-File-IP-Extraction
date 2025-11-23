@@ -42,15 +42,63 @@ The application continuously monitors a specified log file and performs the foll
 ## Project Structure
 
 ```
-ip_extractor/
+-Log-File-IP-Extraction/
 │
 ├── src/
 │   └── main.py             # Core extraction logic
 ├── data/
 │   └── access.log          # Log file to be processed
-├── Dockerfile              # Docker containerization
-└── docker-compose.yml      # Docker composition
+├── docker/
+│   └── Dockerfile          # Docker containerization
+├── docker-compose.yml      # Docker composition
+├── requirements.txt        # Python dependencies
+└── README.md              # Project documentation
 ```
+
+## Requirements
+
+### Prerequisites
+
+- **Python**: 3.9 or higher (uses built-in `ipaddress` module)
+- **MongoDB**: 4.0 or higher (can be run via Docker)
+- **Docker & Docker Compose**: For containerized deployment (optional)
+
+### Python Dependencies
+
+Install required Python packages:
+
+```bash
+pip install -r requirements.txt
+```
+
+**Dependencies:**
+- `pymongo==4.6.1` - MongoDB driver for Python
+
+**Note**: The `ipaddress` module is part of Python's standard library (Python 3.3+), so no additional package is needed.
+
+## Installation
+
+### Local Development
+
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd -Log-File-IP-Extraction
+   ```
+
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Ensure MongoDB is running locally or update the connection URI in the code.
+
+4. Place your log file in the `data/` directory as `access.log`.
+
+5. Run the application:
+   ```bash
+   python src/main.py
+   ```
 
 ## Configuration
 
@@ -62,11 +110,16 @@ ip_extractor/
 
 ### MongoDB Configuration
 
-- **Connection URI**: Configurable in `main.py`
-- **Default URI**: `mongodb://mongodb:27017`
-- **Collections**:
-  - `private_ips`: Stores private IP addresses
-  - `public_ips`: Stores public IP addresses
+The application uses environment variables for MongoDB configuration:
+
+- **MONGODB_URI**: MongoDB connection string (default: `mongodb://mongodb:27017/`)
+- **DATABASE_NAME**: Database name (default: `ip_extraction`)
+
+**Collections:**
+- `private_ips`: Stores private IP addresses with `first_seen` and `last_seen` timestamps
+- `public_ips`: Stores public IP addresses with `first_seen` and `last_seen` timestamps
+
+**Note**: Both collections have unique indexes on the `ip` field to prevent duplicates.
 
 ## Docker Deployment
 
@@ -76,12 +129,30 @@ ip_extractor/
 
 ### Deployment Steps
 
-1. Clone the repository
-2. Add your log file under data with name access.log
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd -Log-File-IP-Extraction
+   ```
+
+2. Add your log file under `data/` directory with name `access.log`
+
 3. Run deployment:
    ```bash
    docker-compose up --build
    ```
+
+The Docker setup includes:
+- **ip-extractor service**: Runs the Python application
+- **mongodb service**: MongoDB database instance
+- **Volume mounting**: Log file is mounted from host to container
+- **Automatic retry**: Application retries MongoDB connection if database isn't ready
+
+### Environment Variables (Docker)
+
+You can customize the following environment variables in `docker-compose.yml`:
+- `MONGODB_URI`: MongoDB connection string
+- `DATABASE_NAME`: Database name
 
 
 ## Performance Considerations
@@ -95,14 +166,24 @@ ip_extractor/
 Comprehensive logging provides insights into:
 - MongoDB connection status
 - IP extraction details
-- Error tracking
+- Bulk operation results (inserted/updated counts)
+- Error tracking and retry attempts
 
 **Log Format**: 
 ```
-2024-03-28 10:15:00 - INFO: Successfully connected to MongoDB!
-2024-03-28 10:15:05 - INFO: Extracted 10 private IPs
-2024-03-28 10:15:05 - INFO: Extracted 5 public IPs
+2024-03-28 10:15:00 - INFO: Successfully connected to MongoDB! (URI: mongodb://mongodb:27017/)
+2024-03-28 10:15:00 - INFO: Created unique indexes on IP fields
+2024-03-28 10:15:05 - INFO: Processed 10 private IPs - Inserted: 8, Updated: 2
+2024-03-28 10:15:05 - INFO: Processed 5 public IPs - Inserted: 5, Updated: 0
 ```
+
+## Features
+
+- **Continuous Monitoring**: The application runs in a loop, processing the log file every 10 seconds
+- **Duplicate Prevention**: Uses MongoDB unique indexes to prevent storing duplicate IPs
+- **Timestamp Tracking**: Tracks `first_seen` and `last_seen` timestamps for each IP
+- **Bulk Operations**: Efficiently processes IPs using MongoDB bulk write operations
+- **Connection Resilience**: Automatic retry logic for MongoDB connections with configurable retry attempts
 
 ## Extensibility
 

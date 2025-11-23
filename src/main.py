@@ -4,9 +4,8 @@ import os
 import logging
 from typing import Set, Tuple, List
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import pymongo
 from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
+from pymongo.operations import UpdateOne
 import time
 
 class IPExtractor:
@@ -100,37 +99,66 @@ class IPExtractor:
 
 def connect_to_mongodb(uri: str, database: str = 'ip_extraction', 
                        private_collection: str = 'private_ips', 
-                       public_collection: str = 'public_ips'):
+                       public_collection: str = 'public_ips',
+                       max_retries: int = 5,
+                       retry_delay: int = 5):
     """
-    Establish a connection to MongoDB and return client and collections.
+    Establish a connection to MongoDB with retry logic and return client and collections.
     
     Args:
         uri (str): MongoDB connection URI
         database (str): Database name
         private_collection (str): Collection name for private IPs
         public_collection (str): Collection name for public IPs
+        max_retries (int): Maximum number of connection retry attempts
+        retry_delay (int): Delay in seconds between retry attempts
     
     Returns:
         Tuple of (MongoClient, private collection, public collection)
     """
-    try:
-        # Create a new client and connect to the server
-        client = MongoClient(uri, server_api=ServerApi('1'))
+    for attempt in range(max_retries):
+        try:
+            # Create a new client and connect to the server
+            # Use serverSelectionTimeoutMS for better connection handling
+            client = MongoClient(
+                uri, 
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+                socketTimeoutMS=5000
+            )
+            
+            # Verify the connection
+            client.admin.command('ping')
+            logging.info(f"Successfully connected to MongoDB! (URI: {uri})")
+            
+            # Get or create database and collections
+            db = client[database]
+            private_coll = db[private_collection]
+            public_coll = db[public_collection]
+            
+            # Create unique indexes for better query performance and uniqueness
+            # This ensures only unique IPs are stored
+            try:
+                private_coll.create_index("ip", unique=True)
+                public_coll.create_index("ip", unique=True)
+                logging.info("Created unique indexes on IP fields")
+            except Exception as index_error:
+                # Index might already exist, which is fine
+                logging.debug(f"Index creation note: {index_error}")
+            
+            logging.info(f"Using database: {database}, collections: {private_collection}, {public_collection}")
+            
+            return client, private_coll, public_coll
         
-        # Verify the connection
-        client.admin.command('ping')
-        logging.info("Successfully connected to MongoDB!")
-        
-        # Get or create database and collections
-        db = client[database]
-        private_coll = db[private_collection]
-        public_coll = db[public_collection]
-        
-        return client, private_coll, public_coll
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logging.warning(f"MongoDB connection attempt {attempt + 1} failed: {e}. Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                logging.error(f"Failed to connect to MongoDB after {max_retries} attempts: {e}")
+                return None, None, None
     
-    except Exception as e:
-        logging.error(f"Failed to connect to MongoDB: {e}")
-        return None, None, None
+    return None, None, None
 
 def main(log_file):
     """Main execution for IP extraction and MongoDB storage."""
@@ -141,11 +169,15 @@ def main(log_file):
             format='%(asctime)s - %(levelname)s: %(message)s'
         )
         
-        # MongoDB connection URI (replace with your actual connection string)
-        mongodb_uri = "mongodb://mongodb:27017"
+        # MongoDB connection URI from environment variable or default
+        mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/')
+        database_name = os.getenv('DATABASE_NAME', 'ip_extraction')
         
         # Connect to MongoDB
-        client, private_coll, public_coll = connect_to_mongodb(mongodb_uri)
+        client, private_coll, public_coll = connect_to_mongodb(
+            mongodb_uri, 
+            database=database_name
+        )
         
         if not client:
             logging.error("MongoDB connection failed. Exiting.")
@@ -154,19 +186,59 @@ def main(log_file):
         # Extract IPs from log file
         private_ips, public_ips = IPExtractor.extract_ips_from_file(log_file)
         
-        # Clear previous entries and insert new IPs
-        private_coll.delete_many({})
-        public_coll.delete_many({})
+        current_time = time.time()
         
-        # Insert IPs as documents
+        # Use bulk operations with upsert to store only unique values
+        # This preserves all previous entries and only adds new unique IPs
         if private_ips:
-            private_coll.insert_many([{'ip': ip} for ip in private_ips])
+            bulk_operations_private = []
+            for ip in private_ips:
+                bulk_operations_private.append(
+                    UpdateOne(
+                        {'ip': ip},
+                        {
+                            '$set': {'ip': ip, 'last_seen': current_time},
+                            '$setOnInsert': {'first_seen': current_time}
+                        },
+                        upsert=True
+                    )
+                )
+            
+            if bulk_operations_private:
+                result_private = private_coll.bulk_write(bulk_operations_private, ordered=False)
+                logging.info(f"Processed {len(private_ips)} private IPs - "
+                           f"Inserted: {result_private.upserted_count}, "
+                           f"Updated: {result_private.modified_count}")
+        
         if public_ips:
-            public_coll.insert_many([{'ip': ip} for ip in public_ips])
+            bulk_operations_public = []
+            for ip in public_ips:
+                bulk_operations_public.append(
+                    UpdateOne(
+                        {'ip': ip},
+                        {
+                            '$set': {'ip': ip, 'last_seen': current_time},
+                            '$setOnInsert': {'first_seen': current_time}
+                        },
+                        upsert=True
+                    )
+                )
+            
+            if bulk_operations_public:
+                result_public = public_coll.bulk_write(bulk_operations_public, ordered=False)
+                logging.info(f"Processed {len(public_ips)} public IPs - "
+                           f"Inserted: {result_public.upserted_count}, "
+                           f"Updated: {result_public.modified_count}")
         
         # Display results
         print(f"Private IPs: {len(private_ips)}")
         print(f"Public IPs: {len(public_ips)}")
+        
+        # Display MongoDB collection counts
+        private_count = private_coll.count_documents({})
+        public_count = public_coll.count_documents({})
+        print(f"MongoDB - Total Private IPs stored: {private_count}")
+        print(f"MongoDB - Total Public IPs stored: {public_count}")
 
         
         # Close MongoDB connection
